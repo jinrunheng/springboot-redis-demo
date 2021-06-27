@@ -6,11 +6,15 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataAccessException;
+import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.connection.RedisStringCommands;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.RedisOperations;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.SessionCallback;
 import org.springframework.test.context.ContextConfiguration;
 
+import java.util.Random;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -110,7 +114,7 @@ public class RedisTest {
      * Redis supports programming transaction,puts all commands into the queue,and submits together
      */
     @Test
-    public void testTransactional(){
+    public void testTransactional() {
         clear();
         Object execute = redisTemplate.execute(new SessionCallback() {
             @Override
@@ -128,4 +132,121 @@ public class RedisTest {
             }
         });
     }
+
+    /**
+     * Redis  HyperLogLog
+     */
+    @Test
+    public void testHyperLogLog() {
+        String redisKey = "test:hll:01";
+        for (int i = 0; i < 10000; i++) {
+            redisTemplate.opsForHyperLogLog().add(redisKey, i);
+        }
+
+        for (int i = 0; i < 10000; i++) {
+            int r = new Random().nextInt(10000);
+            redisTemplate.opsForHyperLogLog().add(redisKey, r);
+        }
+
+        long size = redisTemplate.opsForHyperLogLog().size(redisKey);
+        System.out.println(size); // almost 10000
+    }
+
+    // 3组数据合并，再统计合并后重复数据的独立总数
+    @Test
+    public void testHyperLogLogUnion() {
+        String redisKey01 = "test:hll:01";
+        for (int i = 0; i < 100; i++) {
+            redisTemplate.opsForHyperLogLog().add(redisKey01, i);
+        }
+
+        String redisKey02 = "test:hll:02";
+        for (int i = 100; i < 200; i++) {
+            redisTemplate.opsForHyperLogLog().add(redisKey02, i);
+        }
+
+        String redisKey03 = "test:hll:03";
+        for (int i = 50; i < 150; i++) {
+            redisTemplate.opsForHyperLogLog().add(redisKey03, i);
+        }
+
+        String unionKey = "test:hll:union";
+        redisTemplate.opsForHyperLogLog().union(unionKey, redisKey01, redisKey02, redisKey03);
+
+        long size = redisTemplate.opsForHyperLogLog().size(unionKey);
+        System.out.println(size); //almost 200
+    }
+
+    /**
+     * 统计一组数据的布尔值
+     */
+    @Test
+    public void testBitMap() {
+        String redisKey = "test:bm:01";
+        // record
+        redisTemplate.opsForValue().setBit(redisKey, 0, true);
+        redisTemplate.opsForValue().setBit(redisKey, 4, true);
+        redisTemplate.opsForValue().setBit(redisKey, 9, true);
+
+        // select
+        Assertions.assertTrue(redisTemplate.opsForValue().getBit(redisKey, 0));
+        Assertions.assertFalse(redisTemplate.opsForValue().getBit(redisKey, 1));
+        Assertions.assertTrue(redisTemplate.opsForValue().getBit(redisKey, 4));
+        Assertions.assertTrue(redisTemplate.opsForValue().getBit(redisKey, 9));
+
+        // statistics
+        Object execute = redisTemplate.execute(new RedisCallback() {
+            @Override
+            public Object doInRedis(RedisConnection redisConnection) throws DataAccessException {
+                return redisConnection.bitCount(redisKey.getBytes());
+            }
+        });
+        Assertions.assertEquals(3l, (long) execute);
+    }
+
+    // 统计三组数据的布尔值，并对这三组数据做 or 运算
+    @Test
+    public void testBitMapOperation() {
+        String redisKey02 = "test:bm:02";
+        redisTemplate.opsForValue().setBit(redisKey02, 0, true);
+        redisTemplate.opsForValue().setBit(redisKey02, 1, true);
+        redisTemplate.opsForValue().setBit(redisKey02, 2, true);
+
+        String redisKey03 = "test:bm:03";
+        redisTemplate.opsForValue().setBit(redisKey03, 0, true);
+        redisTemplate.opsForValue().setBit(redisKey03, 2, true);
+        redisTemplate.opsForValue().setBit(redisKey03, 4, true);
+
+        String redisKey04 = "test:bm:04";
+        redisTemplate.opsForValue().setBit(redisKey04, 4, true);
+        redisTemplate.opsForValue().setBit(redisKey04, 5, true);
+        redisTemplate.opsForValue().setBit(redisKey04, 6, true);
+
+
+        // redisKey02 : 1110000
+        // redisKey03 : 1010100
+        // redisKey04 : 0000111
+        // redisKey02  OR redisKey03 OR redisKey04
+        // redisKey 1110111
+        // redisKey.bitCount = 6
+        String redisKey = "test:bm:or";
+        Object execute = redisTemplate.execute(new RedisCallback() {
+            @Override
+            public Object doInRedis(RedisConnection redisConnection) throws DataAccessException {
+                redisConnection.bitOp(RedisStringCommands.BitOperation.OR
+                        , redisKey.getBytes(),
+                        redisKey02.getBytes(), redisKey03.getBytes(), redisKey04.getBytes());
+                return redisConnection.bitCount(redisKey.getBytes());
+            }
+        });
+        Assertions.assertEquals(6l, (long) execute);
+        Assertions.assertTrue(redisTemplate.opsForValue().getBit(redisKey, 0));
+        Assertions.assertTrue(redisTemplate.opsForValue().getBit(redisKey, 1));
+        Assertions.assertTrue(redisTemplate.opsForValue().getBit(redisKey, 2));
+        Assertions.assertFalse(redisTemplate.opsForValue().getBit(redisKey, 3));
+        Assertions.assertTrue(redisTemplate.opsForValue().getBit(redisKey, 4));
+        Assertions.assertTrue(redisTemplate.opsForValue().getBit(redisKey, 5));
+        Assertions.assertTrue(redisTemplate.opsForValue().getBit(redisKey, 6));
+    }
+
 }
